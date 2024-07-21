@@ -182,8 +182,12 @@ func (l *RaftLog) Release(index uint64) {
 	l.stabled = l.LastIndex()
 }
 
-func (l *RaftLog) UpdateStabled() {
-	l.stabled = l.LastIndex()
+func (l *RaftLog) UpdateStabled(index uint64) {
+	l.stabled = index
+}
+
+func (l *RaftLog) UpdateApplied(index uint64) {
+	l.applied = index
 }
 
 func (l *RaftLog) UpdateCommit(commitIndex uint64, logIndex uint64, entriesLen uint64) {

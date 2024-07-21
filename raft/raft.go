@@ -205,7 +205,7 @@ func newRaft(c *Config) *Raft {
 		Prs:                 prs,
 		State:               StateFollower,
 		votes:               votes,
-		msgs:                make([]pb.Message, 0),
+		msgs:                nil,
 		Lead:                None,
 		heartbeatTimeout:    c.HeartbeatTick,
 		electionTimeOutBase: c.ElectionTick,
