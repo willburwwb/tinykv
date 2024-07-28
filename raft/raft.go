@@ -187,6 +187,7 @@ func newRaft(c *Config) *Raft {
 			}
 		}
 	} else {
+		// 2B 测试用例会传入confState
 		for _, id := range confState.Nodes {
 			prs[id] = &Progress{
 				Match: 0,
@@ -194,6 +195,8 @@ func newRaft(c *Config) *Raft {
 			}
 		}
 	}
+
+	// log.Infof("prs %+v", prs)
 
 	votes := make(map[uint64]bool)
 
@@ -218,6 +221,10 @@ func newRaft(c *Config) *Raft {
 
 	//log.Infof("init raft %+v", r)
 	return r
+}
+
+func (r *Raft) GetRaftId() uint64 {
+	return r.id
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -272,7 +279,7 @@ func (r *Raft) sendRequestVote(to uint64) {
 	// 保证安全性，只有拥有最新提交日志的节点才能成为 leader
 	lastLogIndex, lastLogTerm, err := r.RaftLog.GetLastIndexAndTerm()
 	if err != nil {
-		//log.Errorf("get last log index and term failed when sendRequestVote, err: %v", err)
+		log.Errorf("get last log index and term failed when sendRequestVote, err: %v", err)
 		return
 	}
 
@@ -408,8 +415,8 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	//	log.Infof("node %v handle msg %+v", r.id, m)
 	var err error
-
 	// 判断节点是否在分区中
 	if !r.promotable(r.id) {
 		log.Errorf("peer %d is not promotable", r.id)
@@ -610,7 +617,6 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 
 func (r *Raft) updateCommitIndex() uint64 {
 	// 1. 计算大多数节点的 commitIndex
-	//log.Infof("===peer %d update commitIndex===", r.id)
 	matchIndex := make([]uint64, 0)
 	for id := range r.Prs {
 		matchIndex = append(matchIndex, r.Prs[id].Match)
@@ -645,7 +651,6 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 	// 对于所有 server，如果 term > currentTerm，表明新 term 的到来以前的vote作废，所以全部节点转为 Follower
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None) // 转为 follower, 但是不一定会发送投票，follower 不一定是 from
-		r.Vote = m.From
 	}
 
 	// 2. 如果 votedFor 不为空，并且不为 candidateId，表明 term 没有变过，返回 false
@@ -713,10 +718,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	if m.Term > r.Term {
-		r.Term = m.Term
-		if r.State == StateCandidate || r.State == StateLeader {
-			r.becomeFollower(m.Term, m.From)
-		}
+		r.becomeFollower(m.Term, m.From)
 		return
 	}
 
@@ -750,11 +752,7 @@ func (r *Raft) reset(term uint64) {
 	r.Term = term
 	r.Vote = None
 	//r.Prs = make(map[uint64]*Progress)
-	prs := make(map[uint64]*Progress)
-	for id := range r.Prs {
-		prs[id] = nil
-	}
-	r.Prs = prs
+	// 这里不能重置peers
 
 	r.votes = make(map[uint64]bool)
 	r.msgs = make([]pb.Message, 0)

@@ -143,15 +143,20 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return 0, nil
 	}
 
-	if i < l.firstIndex {
-		return 0, ErrCompacted
+	if len(l.entries) > 0 && i >= l.firstIndex && i <= l.LastIndex() {
+		return l.entries[i-l.firstIndex].Term, nil
 	}
 
-	if i > l.LastIndex() {
-		return 0, ErrUnavailable
-	}
+	//if i < l.firstIndex {
+	//	return 0, ErrCompacted
+	//}
+	//
+	//if i > l.LastIndex() {
+	//	return 0, ErrUnavailable
+	//}
 
-	return l.entries[i-l.firstIndex].Term, nil
+	term, err := l.storage.Term(i)
+	return term, err
 }
 
 func (l *RaftLog) Append(entries []*pb.Entry) {
