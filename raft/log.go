@@ -54,6 +54,9 @@ type RaftLog struct {
 
 	// Your Data Here (2A).
 	firstIndex uint64 // 用于标记entries[0] 在 storage 中的 index
+
+	snapshotIndex uint64
+	snapshotTerm  uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -135,12 +138,20 @@ func (l *RaftLog) LastIndex() uint64 {
 	return l.firstIndex + uint64(len(l.entries)) - 1
 }
 
+func (l *RaftLog) FirstIndex() uint64 {
+	return l.firstIndex
+}
+
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
 	// 为了解决 i 为 0 的情况
 	if i == 0 {
 		return 0, nil
+	}
+
+	if i == l.snapshotIndex {
+		return l.snapshotTerm, nil
 	}
 
 	if len(l.entries) > 0 && i >= l.firstIndex && i <= l.LastIndex() {
@@ -249,4 +260,21 @@ func (l *RaftLog) TryCommit(index uint64, term uint64) (uint64, error) {
 	}
 	l.committed = max(index, l.committed)
 	return l.committed, nil
+}
+
+// ApplySnapshot (2C)
+func (l *RaftLog) ApplySnapshot(snapShot *pb.Snapshot) {
+	if snapShot.Metadata.Index+1 <= l.LastIndex() {
+		l.entries = l.entries[snapShot.Metadata.Index+1-l.firstIndex:]
+	} else {
+		l.entries = nil
+	}
+	l.firstIndex = snapShot.Metadata.Index + 1
+	l.applied = snapShot.Metadata.Index
+	l.committed = snapShot.Metadata.Index
+	l.stabled = snapShot.Metadata.Index
+	// 将 pendingSnapshot 设置为 snapShot，在上层 peer 调用 Ready 时传给 peer，用于将 snapShot 写入 kv engine 中
+	l.pendingSnapshot = snapShot
+	l.snapshotIndex = snapShot.Metadata.Index
+	l.snapshotTerm = snapShot.Metadata.Term
 }

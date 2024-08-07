@@ -64,18 +64,24 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	// 3. apply ready 中的 committedEntries
 	for _, entry := range ready.CommittedEntries {
-		wb := &engine_util.WriteBatch{}
+		kvWB := &engine_util.WriteBatch{}
+		raftWB := &engine_util.WriteBatch{}
 		if entry.EntryType == eraftpb.EntryType_EntryNormal {
-			d.applyEntry(&entry, wb)
+			d.applyEntry(&entry, kvWB, raftWB)
 		}
 
 		d.peerStorage.applyState.AppliedIndex = entry.Index
-		err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		err := kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 		if err != nil {
 			log.Panic(err)
 		}
 
-		err = wb.WriteToDB(d.peerStorage.Engines.Kv)
+		err = kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		err = raftWB.WriteToDB(d.peerStorage.Engines.Raft)
 		if err != nil {
 			log.Panic(err)
 		}
@@ -84,7 +90,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	d.RaftGroup.Advance(ready)
 }
 
-func (d *peerMsgHandler) applyEntry(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+func (d *peerMsgHandler) applyEntry(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) {
 	req := new(raft_cmdpb.RaftCmdRequest)
 	err := req.Unmarshal(entry.Data)
 	if err != nil {
@@ -92,6 +98,9 @@ func (d *peerMsgHandler) applyEntry(entry *eraftpb.Entry, kvWB *engine_util.Writ
 		return
 	}
 
+	//if len(req.Requests) == 0 && req.AdminRequest == nil {
+	//	log.Infof("empty request %+v", req)
+	//}
 	if len(req.Requests) > 0 {
 		for _, request := range req.Requests {
 			switch request.CmdType {
@@ -105,6 +114,11 @@ func (d *peerMsgHandler) applyEntry(entry *eraftpb.Entry, kvWB *engine_util.Writ
 			case raft_cmdpb.CmdType_Snap:
 				d.applySnapEntry(entry, request)
 			}
+		}
+	} else if req.AdminRequest != nil {
+		switch req.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			d.applyCompactEntry(entry, req.AdminRequest, kvWB)
 		}
 	}
 }
@@ -174,6 +188,22 @@ func (d *peerMsgHandler) applySnapEntry(entry *eraftpb.Entry, req *raft_cmdpb.Re
 		},
 	}
 	d.handleProposal(resp, entry, true)
+}
+
+func (d *peerMsgHandler) applyCompactEntry(entry *eraftpb.Entry, req *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
+	compactIndex := req.CompactLog.CompactIndex
+	compactTerm := req.CompactLog.CompactTerm
+	if compactIndex > d.peerStorage.applyState.TruncatedState.Index {
+		d.peerStorage.applyState.TruncatedState.Index = compactIndex
+		d.peerStorage.applyState.TruncatedState.Term = compactTerm
+
+		err := kvWB.SetMeta(meta.ApplyStateKey(d.Region().GetId()), d.peerStorage.applyState)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		d.ScheduleCompactLog(compactIndex)
+	}
 }
 
 func (d *peerMsgHandler) handleProposal(resp *raft_cmdpb.RaftCmdResponse, entry *eraftpb.Entry, isApplySnap bool) {
@@ -292,10 +322,23 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		// 2. 设置该 request 的回调
 		d.appendProposal(d.nextProposalIndex(), d.Term(), cb)
 		// 3. 将该 request 提交到 raft group 中
+
 		err = d.RaftGroup.Propose(data)
 		if err != nil {
 			cb.Done(ErrResp(err))
 			return
+		}
+	} else {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			data, err := msg.Marshal()
+			if err != nil {
+				log.Panic(err)
+			}
+			err = d.RaftGroup.Propose(data)
+			if err != nil {
+				log.Panic(err)
+			}
 		}
 	}
 }

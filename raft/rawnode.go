@@ -191,6 +191,10 @@ func (rn *RawNode) Ready() Ready {
 	ready.Entries = rn.Raft.RaftLog.unstableEntries()
 	ready.CommittedEntries = rn.Raft.RaftLog.nextEnts()
 	ready.Messages = rn.Raft.msgs
+
+	if rn.Raft.RaftLog.pendingSnapshot != nil {
+		ready.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	}
 	return ready
 }
 
@@ -219,6 +223,10 @@ func (rn *RawNode) HasReady() bool {
 		return true
 	}
 
+	if rn.Raft.RaftLog.pendingSnapshot != nil {
+		return true
+	}
+
 	return false
 }
 
@@ -243,6 +251,8 @@ func (rn *RawNode) Advance(rd Ready) {
 	}
 
 	rn.Raft.msgs = nil
+
+	rn.Raft.RaftLog.pendingSnapshot = nil
 }
 
 // GetProgress return the Progress of this node and its peers, if this

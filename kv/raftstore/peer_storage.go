@@ -344,6 +344,42 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
+
+	// 清除旧数据，raft engine 中的 logs / localState, kv engine 中的 region state / raft state
+	if ps.isInitialized() {
+		err := ps.clearMeta(kvWB, raftWB)
+		if err != nil {
+			log.Panic(err)
+		}
+		ps.clearExtraData(ps.Region())
+	}
+
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+
+	err := raftWB.SetMeta(meta.RaftStateKey(ps.Region().GetId()), ps.raftState)
+	if err != nil {
+		return nil, err
+	}
+
+	err = kvWB.SetMeta(meta.ApplyStateKey(ps.Region().GetId()), ps.applyState)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan bool, 1)
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: ps.Region().GetId(),
+		Notifier: ch,
+		SnapMeta: snapshot.Metadata,
+		StartKey: ps.Region().GetStartKey(),
+		EndKey:   ps.Region().GetEndKey(),
+	}
+	<-ch
+
 	return nil, nil
 }
 
@@ -353,8 +389,17 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
 	raftWB := new(engine_util.WriteBatch)
+	kvWB := new(engine_util.WriteBatch)
 
-	// 1. 将 unstable entries 写入 raftWB 中
+	// 应用 snapShot
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		_, err := ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		if err != nil {
+			log.Panic(err)
+		}
+	}
+
+	// 1. 将 unstable entries 写入 raftWB 中 (snapshot 之后可能也会有 entries ?)
 	if err := ps.Append(ready.Entries, raftWB); err != nil {
 		return nil, err
 	}
@@ -371,6 +416,12 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 
 	// 3. 将 unstable entries, raftState 写入 raft engine
 	err = raftWB.WriteToDB(ps.Engines.Raft)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	// 4. 将 applyState 写入 kv engine （snapshot 的写入交给系统处理）
+	err = kvWB.WriteToDB(ps.Engines.Kv)
 	if err != nil {
 		log.Panic(err)
 	}

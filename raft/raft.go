@@ -232,6 +232,48 @@ func (r *Raft) GetRaftId() uint64 {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 
+	// Code for 2C
+	// 当 r.Prs[to].Next <= lastSnapshotIndex 需要先发送 snapshot 给该节点
+	if r.Prs[to].Next <= r.RaftLog.FirstIndex()-1 {
+
+		// 如果 pendingSnapshot 不为nil，代表已经生成
+		if r.RaftLog.pendingSnapshot != nil {
+			r.msgs = append(r.msgs, pb.Message{
+				MsgType:  pb.MessageType_MsgSnapshot,
+				From:     r.id,
+				To:       to,
+				Term:     r.Term,
+				LogTerm:  r.RaftLog.pendingSnapshot.Metadata.Term,
+				Index:    r.RaftLog.pendingSnapshot.Metadata.Index,
+				Snapshot: r.RaftLog.pendingSnapshot,
+			})
+			return true
+		}
+
+		snapshot, err := r.RaftLog.storage.Snapshot()
+		if err != nil && !errors.Is(err, ErrSnapshotTemporarilyUnavailable) {
+			log.Panic(err)
+		}
+
+		// snapshot 的生成需要时间，可能为 nil
+		if err != nil && errors.Is(err, ErrSnapshotTemporarilyUnavailable) {
+			log.Infof("peer %d sendAppend Snapshot to %d failed, snapshot is nil", r.id, to)
+			return false
+		}
+
+		// 假如 snapshot 不为 nil, 先发送 snapshot 之后再发送剩下的 entries
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType:  pb.MessageType_MsgSnapshot,
+			From:     r.id,
+			To:       to,
+			Term:     r.Term,
+			LogTerm:  snapshot.Metadata.Term,
+			Index:    snapshot.Metadata.Index,
+			Snapshot: &snapshot,
+		})
+		return true
+	}
+
 	// append entries 时，preLogIndex 为 r.Prs[to].next - 1
 	preLogIndex := r.Prs[to].Next - 1
 	preLogTerm, err := r.RaftLog.Term(preLogIndex)
@@ -415,11 +457,9 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	//	log.Infof("node %v handle msg %+v", r.id, m)
 	var err error
 	// 判断节点是否在分区中
 	if !r.promotable(r.id) {
-		log.Errorf("peer %d is not promotable", r.id)
 		return nil
 	}
 
@@ -438,6 +478,7 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleRequestVote(m)
 		case pb.MessageType_MsgRequestVoteResponse:
 		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
@@ -457,6 +498,7 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgRequestVoteResponse:
 			r.handleRequestVoteResp(m)
 		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
@@ -477,6 +519,7 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleRequestVote(m)
 		case pb.MessageType_MsgRequestVoteResponse:
 		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
@@ -730,6 +773,46 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if m.Term < r.Term {
+		r.sendAppendResp(true, m.From, r.RaftLog.LastIndex())
+		return
+	}
+
+	if m.Term >= r.Term {
+		r.Term = m.Term
+		r.Lead = m.From
+		if r.State == StateLeader || r.State == StateCandidate {
+			r.becomeFollower(m.Term, r.Lead)
+		}
+	}
+
+	// 根据测试样例，当 snapshot 中的 commitIndex 小于 raftLog commitIndex 时，直接返回
+	if m.Snapshot.Metadata.Index < r.RaftLog.committed {
+		r.sendAppendResp(true, m.From, r.RaftLog.LastIndex())
+		return
+	}
+	// 通过 snapshot 更新 raftLog 中的状态
+	r.RaftLog.ApplySnapshot(m.Snapshot)
+
+	// 根据 snapshot ConfState 更新自己的 Prs 信息
+	if m.Snapshot.Metadata.ConfState != nil {
+		r.Prs = make(map[uint64]*Progress)
+		for _, node := range m.Snapshot.Metadata.ConfState.Nodes {
+			if node == r.id {
+				r.Prs[node] = &Progress{
+					Match: r.RaftLog.LastIndex(),
+					Next:  r.RaftLog.LastIndex() + 1,
+				}
+			} else {
+				r.Prs[node] = &Progress{
+					Match: 0,
+					Next:  r.RaftLog.LastIndex() + 1,
+				}
+			}
+		}
+	}
+
+	r.sendAppendResp(false, m.From, r.RaftLog.LastIndex())
 }
 
 // addNode add a new node to raft group
