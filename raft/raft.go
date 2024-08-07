@@ -366,6 +366,14 @@ func (r *Raft) sendHeartbeatResponse(to uint64) {
 	})
 }
 
+func (r *Raft) sendTimeoutNow(to uint64) {
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		From:    r.id,
+		To:      to,
+	})
+}
+
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
@@ -462,6 +470,7 @@ func (r *Raft) Step(m pb.Message) error {
 	if !r.promotable(r.id) {
 		return nil
 	}
+	//	log.Infof("node %v step %+v", r.id, m)
 
 	switch r.State {
 	case StateFollower:
@@ -482,6 +491,10 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
+		case pb.MessageType_MsgTransferLeader:
+			r.handleTransferLeader(m)
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleTimeoutNow(m)
 		}
 	case StateCandidate:
 		switch m.MsgType {
@@ -502,7 +515,10 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgHeartbeat:
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
-
+		case pb.MessageType_MsgTransferLeader:
+			r.handleTransferLeader(m)
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleTimeoutNow(m)
 		}
 	case StateLeader:
 		switch m.MsgType {
@@ -524,6 +540,11 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgHeartbeatResponse:
 			r.handleHeartbeatResponse(m)
+		case pb.MessageType_MsgTransferLeader:
+			r.handleTransferLeader(m)
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleTimeoutNow(m)
+
 		}
 	}
 
@@ -563,6 +584,12 @@ func (r *Raft) handleBeat(m pb.Message) {
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
+	// 当 leader 正在进行 leaderTransfer 时, 不接受 proposal msg
+	if r.leadTransferee != None {
+		//		log.Infof("node %v is in leaderTransfer state!", r.id)
+		return
+	}
+
 	// 1. 更新本节点日志, 并更新本节点的 match 和 next
 	r.RaftLog.Propose(r.Term, m.Entries) // 注意这里的entries没有term和index, 与AppendEntries不同
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
@@ -655,6 +682,15 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 			}
 			r.sendAppend(id)
 		}
+	}
+
+	// 	当收到 leadTransferee 节点的日志同步的回复后，要将再次发起 TransferLeader
+	if m.From == r.leadTransferee {
+		_ = r.Step(pb.Message{
+			MsgType: pb.MessageType_MsgTransferLeader,
+			From:    m.From,
+			To:      r.id,
+		})
 	}
 }
 
@@ -815,14 +851,79 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.sendAppendResp(false, m.From, r.RaftLog.LastIndex())
 }
 
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	// 当节点不是 leader 状态时, 将消息转发给 leader
+	if r.State != StateLeader {
+		if r.Lead != None {
+			r.msgs = append(r.msgs, pb.Message{
+				MsgType: pb.MessageType_MsgTransferLeader,
+				From:    m.From,
+				To:      r.Lead,
+			})
+		}
+		return
+	}
+
+	//	log.Infof("node %v transfer to %v", r.id, m.From)
+
+	r.leadTransferee = m.From
+	if !r.promotable(r.leadTransferee) {
+		//		log.Errorf("the transfer node %v is not promotable", r.leadTransferee)
+		return
+	}
+
+	// leadTransferee 的日志是否时最新的
+	if r.Prs[r.leadTransferee].Match == r.Prs[r.id].Match {
+		r.sendTimeoutNow(r.leadTransferee)
+	} else {
+		// 先同步日志，再发送 TimeoutNow msg
+		r.sendAppend(r.leadTransferee)
+	}
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	_ = r.Step(pb.Message{
+		MsgType: pb.MessageType_MsgHup,
+		From:    r.id,
+		To:      r.id,
+	})
+}
+
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if r.promotable(id) {
+		return
+	}
+
+	r.Prs[id] = &Progress{
+		Match: 0,
+		Next:  r.RaftLog.LastIndex() + 1,
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if !r.promotable(id) {
+		return
+	}
+
+	delete(r.Prs, id)
+
+	if len(r.Prs) >= 1 {
+		oldCommit := r.RaftLog.committed
+		r.updateCommitIndex()
+
+		if r.RaftLog.committed > oldCommit {
+			for id := range r.Prs {
+				if id == r.id {
+					continue
+				}
+				r.sendAppend(id)
+			}
+		}
+	}
 }
 
 // promotable 是否可以提升为 leader
@@ -843,4 +944,5 @@ func (r *Raft) reset(term uint64) {
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
 	r.electionTimeout = r.electionTimeOutBase + rand.Int()%r.electionTimeOutBase
+	r.leadTransferee = None
 }
