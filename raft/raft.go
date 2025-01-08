@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/log"
 	"math/rand"
 	"sort"
@@ -353,6 +354,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
+		Commit:  util.RaftInvalidIndex,
 	})
 }
 
@@ -467,10 +469,12 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	var err error
 	// 判断节点是否在分区中
-	if !r.promotable(r.id) {
+
+	//	log.Infof("node %v step %+v %v", r.id, m, r.Prs)
+
+	if !r.promotable(r.id) && m.To != r.id {
 		return nil
 	}
-	//	log.Infof("node %v step %+v", r.id, m)
 
 	switch r.State {
 	case StateFollower:
@@ -586,7 +590,7 @@ func (r *Raft) handleBeat(m pb.Message) {
 func (r *Raft) handlePropose(m pb.Message) {
 	// 当 leader 正在进行 leaderTransfer 时, 不接受 proposal msg
 	if r.leadTransferee != None {
-		//		log.Infof("node %v is in leaderTransfer state!", r.id)
+		log.Infof("node %v is in leaderTransfer state %v!!!", r.id, r.leadTransferee)
 		return
 	}
 
@@ -600,6 +604,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 		if id == r.id {
 			continue
 		}
+		//	log.Infof("node %v send msg to %v", r.id, id)
 		r.sendAppend(id)
 	}
 
@@ -864,17 +869,23 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 		return
 	}
 
-	//	log.Infof("node %v transfer to %v", r.id, m.From)
+	// 要转移的还是自己，直接返回
+	if r.id == m.From {
+		return
+	}
+
+	// log.Infof("node %v transfer to %v", r.id, m.From)
 
 	r.leadTransferee = m.From
 	if !r.promotable(r.leadTransferee) {
-		//		log.Errorf("the transfer node %v is not promotable", r.leadTransferee)
+		//log.Errorf("the transfer node %v is not promotable", r.leadTransferee)
 		return
 	}
 
 	// leadTransferee 的日志是否时最新的
 	if r.Prs[r.leadTransferee].Match == r.Prs[r.id].Match {
 		r.sendTimeoutNow(r.leadTransferee)
+		log.Infof("%d transfer leader to %d success !", r.id, r.leadTransferee)
 	} else {
 		// 先同步日志，再发送 TimeoutNow msg
 		r.sendAppend(r.leadTransferee)

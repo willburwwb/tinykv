@@ -380,7 +380,12 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 	<-ch
 
-	return nil, nil
+	// 返回 applySnapResult, preRegion 为之前的 region
+	applySnapResult := &ApplySnapResult{
+		PrevRegion: ps.Region(),
+		Region:     snapData.Region,
+	}
+	return applySnapResult, nil
 }
 
 // Save memory states to disk.
@@ -391,9 +396,11 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	raftWB := new(engine_util.WriteBatch)
 	kvWB := new(engine_util.WriteBatch)
 
+	applySnapResult := new(ApplySnapResult)
 	// 应用 snapShot
 	if !raft.IsEmptySnap(&ready.Snapshot) {
-		_, err := ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		var err error
+		applySnapResult, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
 		if err != nil {
 			log.Panic(err)
 		}
@@ -426,7 +433,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		log.Panic(err)
 	}
 
-	return nil, nil
+	return applySnapResult, nil
 }
 
 func (ps *PeerStorage) ClearData() {

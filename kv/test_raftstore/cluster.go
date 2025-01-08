@@ -413,6 +413,7 @@ func (c *Cluster) MustTransferLeader(regionID uint64, leader *metapb.Peer) {
 	timer := time.Now()
 	for {
 		currentLeader := c.LeaderOfRegion(regionID)
+		// log.Infof("currentLeader %v", currentLeader)
 		if currentLeader.Id == leader.Id &&
 			currentLeader.StoreId == leader.StoreId {
 			return

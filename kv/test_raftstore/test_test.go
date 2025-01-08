@@ -611,6 +611,7 @@ func TestConfChangeRemoveLeader3B(t *testing.T) {
 
 	// rejoin and become leader, now store 1 can see it
 	cluster.MustAddPeer(1, NewPeer(1, 1))
+	// log.Infof("start transferleader")
 	cluster.MustTransferLeader(1, NewPeer(1, 1))
 	cluster.MustPut([]byte("k1"), []byte("v1"))
 	MustGetEqual(cluster.engines[1], []byte("k0"), []byte("v0"))
@@ -706,7 +707,7 @@ func TestOneSplit3B(t *testing.T) {
 	resp, _ := cluster.CallCommandOnLeader(&req, time.Second)
 	assert.NotNil(t, resp.GetHeader().GetError())
 	assert.NotNil(t, resp.GetHeader().GetError().GetKeyNotInRegion())
-
+	log.Infof("get id %v %v %v %v", left.GetStartKey(), left.GetEndKey(), right.GetStartKey(), right.GetEndKey())
 	MustGetEqual(cluster.engines[5], []byte("k100"), []byte("v100"))
 }
 
